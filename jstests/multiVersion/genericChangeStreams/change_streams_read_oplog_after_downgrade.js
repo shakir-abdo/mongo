@@ -27,12 +27,7 @@ const st = new ShardingTest({
         configOptions:
             {setParameter: {reshardingCriticalSectionTimeoutMillis: 24 * 60 * 60 * 1000}},
         mongosOptions: {binVersion: "latest"}
-    },
-    // By default, our test infrastructure sets the election timeout to a very high value (24
-    // hours). For this test, we need a shorter election timeout because it relies on nodes running
-    // an election when they do not detect an active primary. Therefore, we are setting the
-    // electionTimeoutMillis to its default value.
-    initiateWithDefaultElectionTimeout: true
+    }
 });
 
 assert.commandWorked(
@@ -171,7 +166,7 @@ const standardTestCases = [
         generateOpLogEntry: function(coll) {
             assert.commandWorked(coll.insert({sk: 2, a: 1}));
             assert.commandWorked(coll.getDB().adminCommand(
-                {reshardCollection: coll.getFullName(), key: {sk: 1, a: 1}}));
+                {reshardCollection: coll.getFullName(), key: {sk: 1, a: 1}, numInitialChunks: 1}));
         }
     }
 ];

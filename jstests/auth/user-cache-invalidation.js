@@ -219,11 +219,11 @@ function runTest(writeNode, readNode, awaitReplication) {
     for (let i = 0; i < cfg.members.length; ++i) {
         cfg.members[i].priority = i ? 0 : 1;
     }
-    rst.initiate(cfg);
+    rst.initiateWithHighElectionTimeout(cfg);
     rst.awaitSecondaryNodes();
 
     // Freeze secondaries to avoid surprise stepdowns.
-    rst.getSecondaries().forEach(rst.freeze);
+    rst.getSecondaries().forEach(node => rst.freeze(node));
     rst.awaitReplication();
 
     // Now identify the permanent primary and secondary we'll use.

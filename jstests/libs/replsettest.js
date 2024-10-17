@@ -68,15 +68,17 @@ export class ReplSetTest {
      *     ShardingTest, the seed is generated as part of ShardingTest.
      * @param {boolean} [opts.useAutoBootstrapProcedure] If true, follow the procedure for
      *     auto-bootstrapped replica sets.
+     * @param {number} [opts.timeoutMS] Timeout value in milliseconds.
      */
     constructor(opts) {
         if (this.constructor === ReplSetTest && this.constructor[kOverrideConstructor]) {
             return new this.constructor[kOverrideConstructor][kOverrideConstructor](opts);
         }
 
-        // Some code still references kDefaultTimeoutMS as a (non-static) member variable, so make
-        // sure it's still accessible that way.
-        this.kDefaultTimeoutMS = ReplSetTest.kDefaultTimeoutMS;
+        // If opts.timeoutMS is present use that for the ReplSetTest instance, otherwise use global
+        // value.
+        // TODO(SERVER-95853): Rename instance kDefaultTimeoutMS to timeoutMS.
+        this.kDefaultTimeoutMS = opts.timeoutMS || ReplSetTest.kDefaultTimeoutMS;
 
         // If opts is passed in as a string, let it pass unmodified since strings are pass-by-value.
         // if it is an object, though, pass in a deep copy.
@@ -1061,8 +1063,9 @@ export class ReplSetTest {
      * Ensures that a primary is elected (not necessarily node 0).
      * initiate() should be preferred instead of this, but this is useful when the connections
      * aren't authorized to run replSetGetStatus.
+     * TODO(SERVER-14017): remove this in favor of using initiate() everywhere.
      */
-    _initiateWithAnyNodeAsPrimary(cfg, initCmd, {
+    initiateWithAnyNodeAsPrimary(cfg, initCmd, {
         doNotWaitForStableRecoveryTimestamp: doNotWaitForStableRecoveryTimestamp = false,
         doNotWaitForReplication: doNotWaitForReplication = false,
         doNotWaitForNewlyAddedRemovals: doNotWaitForNewlyAddedRemovals = false,
@@ -1327,7 +1330,7 @@ export class ReplSetTest {
                     config.version = primaryMember.configVersion + 1;
 
                     config.members = originalMembers.slice(0, i);
-                    cmd = {replSetReconfig: config, maxTimeMS: ReplSetTest.kDefaultTimeoutMS};
+                    cmd = {replSetReconfig: config, maxTimeMS: this.kDefaultTimeoutMS};
                     print("Running reconfig command: " + tojsononeline(cmd));
                     const reconfigRes = primary.adminCommand(cmd);
                     const retryableReconfigCodes = [
@@ -1344,7 +1347,7 @@ export class ReplSetTest {
                     }
                     assert.commandWorked(reconfigRes);
                     return true;
-                }, "reconfig for fixture set up failed", ReplSetTest.kDefaultTimeoutMS, 1000);
+                }, "reconfig for fixture set up failed", this.kDefaultTimeoutMS, 1000);
             }
         }
 
@@ -1488,26 +1491,11 @@ export class ReplSetTest {
      * This version should be prefered where possible but requires all connections in the
      * ReplSetTest to be authorized to run replSetGetStatus.
      */
-    _initiateWithNodeZeroAsPrimary(cfg, initCmd, {
-        doNotWaitForStableRecoveryTimestamp: doNotWaitForStableRecoveryTimestamp = false,
-        doNotWaitForReplication: doNotWaitForReplication = false,
-        doNotWaitForNewlyAddedRemovals: doNotWaitForNewlyAddedRemovals = false,
+    initiateWithNodeZeroAsPrimary(cfg, initCmd, {
         doNotWaitForPrimaryOnlyServices: doNotWaitForPrimaryOnlyServices = false,
-        allNodesAuthorizedToRunRSGetStatus: allNodesAuthorizedToRunRSGetStatus = true
     } = {}) {
         let startTime = new Date();  // Measure the execution time of this function.
-        this._initiateWithAnyNodeAsPrimary(cfg, initCmd, {
-            doNotWaitForStableRecoveryTimestamp: doNotWaitForStableRecoveryTimestamp,
-            doNotWaitForReplication: doNotWaitForReplication,
-            doNotWaitForNewlyAddedRemovals: doNotWaitForNewlyAddedRemovals,
-            doNotWaitForPrimaryOnlyServices: doNotWaitForPrimaryOnlyServices
-        });
-
-        // stepUp() calls awaitReplication() which requires all nodes to be authorized to run
-        // replSetGetStatus.
-        if (!allNodesAuthorizedToRunRSGetStatus) {
-            return;
-        }
+        this.initiateWithAnyNodeAsPrimary(cfg, initCmd, {doNotWaitForPrimaryOnlyServices: true});
 
         // Most of the time node 0 will already be primary so we can skip the step-up.
         let primary = this.getPrimary();
@@ -1520,6 +1508,8 @@ export class ReplSetTest {
                 }
             });
         } else {
+            // stepUp() calls awaitReplication() which requires all nodes to be authorized to run
+            // replSetGetStatus.
             asCluster(this, this.nodes, () => {
                 const newPrimary = this.nodes[0];
                 this.stepUp(newPrimary,
@@ -1534,39 +1524,26 @@ export class ReplSetTest {
               "ms for " + this.nodes.length + " nodes.");
     }
 
-    _addHighElectionTimeoutIfNotSet(config) {
-        config = config || this.getReplSetConfig();
-        config.settings = config.settings || {};
-        config.settings["electionTimeoutMillis"] =
-            config.settings["electionTimeoutMillis"] || ReplSetTest.kForeverMillis;
-        return config;
+    /**
+     * Runs replSetInitiate on the replica set and requests the first node to step up as
+     * primary.
+     */
+    initiate(cfg, initCmd, {
+        doNotWaitForPrimaryOnlyServices: doNotWaitForPrimaryOnlyServices = false,
+    } = {}) {
+        this.initiateWithNodeZeroAsPrimary(
+            cfg, initCmd, {doNotWaitForPrimaryOnlyServices: doNotWaitForPrimaryOnlyServices});
     }
 
     /**
-     * Initializes the replica set with `replSetInitiate`, setting a high election timeout unless
-     * 'initiateWithDefaultElectionTimeout' is true. It requests the first node to step up as
-     * primary. However, if 'allNodesAuthorizedToRunRSGetStatus' is set to false, any node can
-     * become the primary.
+     * Modifies the election timeout to be 24 hours so that no unplanned elections happen. Then
+     * runs replSetInitiate on the replica set with the new config.
      */
-    initiate(cfg, initCmd, {
-        doNotWaitForStableRecoveryTimestamp: doNotWaitForStableRecoveryTimestamp = false,
-        doNotWaitForReplication: doNotWaitForReplication = false,
-        doNotWaitForNewlyAddedRemovals: doNotWaitForNewlyAddedRemovals = false,
-        doNotWaitForPrimaryOnlyServices: doNotWaitForPrimaryOnlyServices = false,
-        initiateWithDefaultElectionTimeout: initiateWithDefaultElectionTimeout = false,
-        allNodesAuthorizedToRunRSGetStatus: allNodesAuthorizedToRunRSGetStatus = true,
-    } = {}) {
-        if (!initiateWithDefaultElectionTimeout) {
-            cfg = this._addHighElectionTimeoutIfNotSet(cfg);
-        }
-
-        return this._initiateWithNodeZeroAsPrimary(cfg, initCmd, {
-            doNotWaitForStableRecoveryTimestamp: doNotWaitForStableRecoveryTimestamp,
-            doNotWaitForReplication: doNotWaitForReplication,
-            doNotWaitForNewlyAddedRemovals: doNotWaitForNewlyAddedRemovals,
-            doNotWaitForPrimaryOnlyServices: doNotWaitForPrimaryOnlyServices,
-            allNodesAuthorizedToRunRSGetStatus: allNodesAuthorizedToRunRSGetStatus
-        });
+    initiateWithHighElectionTimeout(config) {
+        config = config || this.getReplSetConfig();
+        config.settings = config.settings || {};
+        config.settings["electionTimeoutMillis"] = ReplSetTest.kForeverMillis;
+        this.initiate(config);
     }
 
     /**
@@ -1731,7 +1708,7 @@ export class ReplSetTest {
 
         // Set a maxTimeMS so reconfig fails if it times out.
         assert.adminCommandWorkedAllowingNetworkError(
-            this.getPrimary(), {replSetReconfig: config, maxTimeMS: ReplSetTest.kDefaultTimeoutMS});
+            this.getPrimary(), {replSetReconfig: config, maxTimeMS: this.kDefaultTimeoutMS});
     }
 
     /**
@@ -1843,6 +1820,9 @@ export class ReplSetTest {
                 assert.commandWorked(db.adminCommand({
                     "appendOplogNote": 1,
                     "data": {"awaitLastStableRecoveryTimestamp": 1},
+                    // We use the global kDefaultTimeoutMS value since this func is passed to a new
+                    // shell without context.
+                    // TODO(SERVER-14017): Remove subshell use
                     "writeConcern": {"w": "majority", "wtimeout": ReplSetTest.kDefaultTimeoutMS}
                 }));
             };
@@ -1896,7 +1876,7 @@ export class ReplSetTest {
                 return true;
             },
             "Not all members have a stable recovery timestamp",
-            ReplSetTest.kDefaultTimeoutMS,
+            this.kDefaultTimeoutMS,
             retryIntervalMS);
 
         print("AwaitLastStableRecoveryTimestamp: A stable recovery timestamp has successfully " +
@@ -2784,7 +2764,7 @@ export class ReplSetTest {
 
                 throw e;
             }
-        }, `Failed to run replSetFreeze cmd on ${node.host}`);
+        }, `Failed to run replSetFreeze cmd on ${node.host}`, this.kDefaultTimeoutMS);
     }
 
     /**
